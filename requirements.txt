@@ -1,0 +1,35 @@
+# Core numerics
+numpy>=1.26,<2.2
+pandas>=2.1
+scipy>=1.11
+pyarrow>=15.0
+
+# GPU stack (RTX 4050, Ada, CUDA 12.x)
+cupy-cuda12x>=13.0
+numba>=0.59
+
+# Stats / ML for filters and (later) ML layer
+scikit-learn>=1.4
+hmmlearn>=0.3
+xgboost>=2.0
+
+# Backtest / metrics
+matplotlib>=3.8
+plotly>=5.20
+
+# Broker bridge (Windows-only; demo paper-trading)
+MetaTrader5>=5.0.45
+
+# UI (Phase 4)
+streamlit>=1.33
+
+# Config / utils
+pydantic>=2.6
+python-dotenv>=1.0
+typer>=0.12
+rich>=13.7
+
+# Dev
+pytest>=8.0
+pytest-cov>=5.0
+ruff>=0.4

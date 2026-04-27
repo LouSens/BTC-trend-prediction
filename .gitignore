@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Project-local data and artifacts (never commit market data or trained models)
+/data/
+/artifacts/
+/runs/
+*.parquet
+*.feather
+*.csv
+*.pkl
+*.joblib
+*.keras
+*.pt
+*.onnx
+
+# Logs
+*.log
+logs/
+
+# MT5 secrets (never commit broker credentials)
+.env
+.env.*
+secrets.toml
+
+# Claude Code local settings
+.claude/settings.local.json
