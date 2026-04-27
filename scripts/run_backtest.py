@@ -1,17 +1,22 @@
 """End-to-end backtest: bars -> ensemble signal -> filters -> backtest -> metrics + chart.
 
+Examples:
+
     # baseline (no filters, close-only engine)
     python scripts/run_backtest.py --years 2 --timeframe M15
 
-    # Phase 2: all filters + ATR-based TP/SL exits + interactive HTML chart
+    # Phase 2: filters + ATR TP/SL exits + risk-based sizing (1% per trade)
     python scripts/run_backtest.py --years 2 \\
-        --use-regime --use-strength --use-slope --use-momentum --tp-sl
+        --use-regime --use-strength --use-slope --use-momentum \\
+        --tp-sl --risk-per-trade 0.01 --initial-equity 1000000000
+
+    # Scalping preset (M5, tight TP/SL, fast refit)
+    python scripts/run_backtest.py --scalp --tp-sl --risk-per-trade 0.01 --live
 
 Outputs (timestamped) under artifacts/:
 - equity_<ts>.png            static equity + drawdown
 - trades_<ts>.csv            per-trade log
 - metrics_<ts>.json          Sharpe / Sortino / MDD / etc.
-- chart_<ts>.html            interactive Plotly chart (open in browser)
 """
 from __future__ import annotations
 
@@ -42,9 +47,19 @@ from mcmc_cuda.config import ARTIFACTS_DIR
 from mcmc_cuda.data.loader import load_bars
 from mcmc_cuda.strategy.ensemble import EnsembleConfig, generate_signals
 from mcmc_cuda.strategy.filters import FilterConfig, apply_filters, compute_filter_frame
-from mcmc_cuda.ui.trade_chart import render_trade_chart
 
 app = typer.Typer(add_completion=False)
+
+
+SCALP_DEFAULTS = dict(
+    timeframe="M5",
+    horizon=4,
+    train_window=1500,
+    refit_every=48,
+    atr_mult_tp=1.0,
+    atr_mult_sl=0.5,
+    prob_threshold=0.55,
+)
 
 
 @app.command()
@@ -67,14 +82,32 @@ def main(
     adx_min: float = 25.0,
     slope_window: int = 20,
     rsi_length: int = 14,
-    # ---- Engine + viz ----
+    # ---- Engine ----
     tp_sl: bool = typer.Option(False, "--tp-sl/--no-tp-sl",
                                 help="Use OHLC engine with ATR-based TP/SL exits"),
     atr_mult_tp: float = 3.0,
     atr_mult_sl: float = 1.5,
-    chart: bool = typer.Option(True, "--chart/--no-chart",
-                               help="Write interactive Plotly HTML chart"),
-    chart_max_bars: int = 5000,
+    initial_equity: float = typer.Option(10_000.0, "--initial-equity",
+                                         help="Starting account balance in USD."),
+    risk_per_trade: float = typer.Option(0.0, "--risk-per-trade",
+                                         help="Fraction of equity to risk per trade (0 = fixed lot). e.g. 0.01 = 1%%."),
+    contract_size: float = typer.Option(100.0, "--contract-size",
+                                        help="Oz held when risk-per-trade=0 (1 standard lot = 100 oz)."),
+    max_lot_oz: float = typer.Option(1e9, "--max-lot-oz",
+                                     help="Hard cap on position size in oz."),
+    # ---- Scalping preset ----
+    scalp: bool = typer.Option(
+        False, "--scalp/--no-scalp",
+        help="Apply scalping defaults: M5, horizon=4, ATR TP/SL=1.0/0.5, fast refit. "
+             "Override-able by passing the individual flags after --scalp.",
+    ),
+    # ---- Live playback ----
+    live: bool = typer.Option(False, "--live/--no-live",
+                              help="Open a desktop window and animate the backtest as it plays out."),
+    live_speed: int = typer.Option(2, "--live-speed",
+                                   help="Bars advanced per animation frame. Higher = faster playback."),
+    live_interval_ms: int = typer.Option(20, "--live-interval-ms",
+                                         help="Delay between frames in ms."),
     invert_signal: bool = typer.Option(
         False, "--invert-signal/--no-invert-signal",
         help="Flip signal sign — useful when the diagnostic shows anti-edge",
@@ -83,6 +116,20 @@ def main(
     csv: str | None = typer.Option(None, help="Local CSV/parquet to use instead of MT5"),
     use_mt5: bool = True,
 ):
+    if scalp:
+        # Only override values the user didn't explicitly set (typer gives us
+        # the defaults so we can't easily detect "untouched"; we apply scalp
+        # defaults unconditionally — the user can still pass flags AFTER
+        # --scalp on the same command line to override.).
+        timeframe = SCALP_DEFAULTS["timeframe"] if timeframe == "M15" else timeframe
+        horizon = SCALP_DEFAULTS["horizon"] if horizon == 16 else horizon
+        train_window = SCALP_DEFAULTS["train_window"] if train_window == 2000 else train_window
+        refit_every = SCALP_DEFAULTS["refit_every"] if refit_every == 96 else refit_every
+        atr_mult_tp = SCALP_DEFAULTS["atr_mult_tp"] if atr_mult_tp == 3.0 else atr_mult_tp
+        atr_mult_sl = SCALP_DEFAULTS["atr_mult_sl"] if atr_mult_sl == 1.5 else atr_mult_sl
+        print(f"[scalp] timeframe={timeframe} horizon={horizon} "
+              f"refit_every={refit_every} TP/SL={atr_mult_tp}/{atr_mult_sl} ATR")
+
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=int(365 * years))
 
@@ -103,9 +150,6 @@ def main(
         print("      Signal inverted (--invert-signal).")
     print(f"      Raw signal changes: {int((raw_signal.diff().abs() > 0).sum())}")
 
-    # Diagnostic: signal direction vs realized future return.
-    # Positive correlation -> signal is on the right side of the market.
-    # Negative correlation -> signal has anti-edge; consider --invert-signal.
     fwd_ret = bars["close"].pct_change(horizon).shift(-horizon)
     sig_active = raw_signal[raw_signal != 0]
     if len(sig_active) > 50:
@@ -134,10 +178,32 @@ def main(
 
     print("[4/5] Running backtest...")
     if tp_sl:
-        bt_cfg = OHLCBacktestConfig(atr_mult_tp=atr_mult_tp, atr_mult_sl=atr_mult_sl)
-        bt = run_backtest_ohlc(bars[["open", "high", "low", "close"]], signal, bt_cfg)
+        bt_cfg = OHLCBacktestConfig(
+            initial_equity=initial_equity,
+            contract_size=contract_size,
+            risk_per_trade=risk_per_trade,
+            max_lot_oz=max_lot_oz,
+            atr_mult_tp=atr_mult_tp,
+            atr_mult_sl=atr_mult_sl,
+        )
+        if live:
+            from mcmc_cuda.ui.live_chart import LiveChartConfig, play_live
+            print("      [live] opening playback window — close it to continue.")
+            live_cfg = LiveChartConfig(
+                interval_ms=live_interval_ms,
+                bars_per_frame=live_speed,
+                title=f"{symbol} {timeframe} | risk={risk_per_trade*100:.2f}% | "
+                      f"TP/SL={atr_mult_tp}/{atr_mult_sl} ATR | "
+                      f"start ${initial_equity:,.0f}",
+            )
+            bt = play_live(bars[["open", "high", "low", "close"]], signal, bt_cfg, live_cfg)
+        else:
+            bt = run_backtest_ohlc(bars[["open", "high", "low", "close"]], signal, bt_cfg)
         trades = trade_log_ohlc(bt)
     else:
+        if live:
+            print("      [live] requires --tp-sl (the close-only engine has no entry/exit prices). "
+                  "Falling back to non-live.")
         bt = run_backtest(bars["close"], signal)
         trades = trade_log(bt)
     metrics = compute_metrics(bt, trades)
@@ -146,7 +212,6 @@ def main(
     eq_path = ARTIFACTS_DIR / f"equity_{ts}.png"
     trades_path = ARTIFACTS_DIR / f"trades_{ts}.csv"
     metrics_path = ARTIFACTS_DIR / f"metrics_{ts}.json"
-    chart_path = ARTIFACTS_DIR / f"chart_{ts}.html"
 
     print("[5/5] Saving artifacts...")
     fig, ax = plt.subplots(2, 1, figsize=(12, 7), sharex=True)
@@ -157,6 +222,8 @@ def main(
         title_bits.append("filters=" + "+".join(active))
     if tp_sl:
         title_bits.append(f"TP/SL={atr_mult_tp}/{atr_mult_sl} ATR")
+        if risk_per_trade > 0:
+            title_bits.append(f"risk={risk_per_trade*100:.2f}%/trade")
     ax[0].set_title(" | ".join(title_bits))
     ax[0].grid(alpha=0.3)
     ax[1].fill_between(bt.index, bt["drawdown"] * 100, 0, color="tab:red", alpha=0.4)
@@ -169,23 +236,11 @@ def main(
     trades.to_csv(trades_path, index=False)
     metrics_path.write_text(json.dumps(metrics.to_dict(), indent=2, default=str))
 
-    if chart and tp_sl:
-        # Trade chart needs OHLC bars + a trades frame with entry_price/exit_price.
-        render_trade_chart(
-            bars=bars, bt=bt, trades=trades, output_path=chart_path,
-            title=" | ".join(title_bits), max_bars=chart_max_bars,
-        )
-
     print()
     print(json.dumps(metrics.to_dict(), indent=2, default=str))
     print(f"\nEquity curve  -> {eq_path}")
     print(f"Trade log     -> {trades_path}")
     print(f"Metrics JSON  -> {metrics_path}")
-    if chart and tp_sl:
-        print(f"Trade chart   -> {chart_path}    (open in browser)")
-    elif chart and not tp_sl:
-        print("Note: --chart requires --tp-sl (OHLC engine for entry/exit prices). "
-              "Re-run with --tp-sl to get the interactive HTML.")
 
 
 if __name__ == "__main__":
