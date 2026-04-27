@@ -24,6 +24,7 @@ class Metrics:
     profit_factor: float
     expectancy: float
     avg_bars_in_trade: float
+    bankrupt: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -46,7 +47,12 @@ def compute(bt: pd.DataFrame, trades: pd.DataFrame) -> Metrics:
     ann = _annualization_factor(bt.index)
     total_return = float(eq.iloc[-1] / eq.iloc[0] - 1.0)
     years = max((bt.index[-1] - bt.index[0]).total_seconds() / (365 * 86400), 1e-9)
-    cagr = float((eq.iloc[-1] / eq.iloc[0]) ** (1.0 / years) - 1.0)
+    # CAGR is undefined when equity goes <= 0 (account "blew up"). Report NaN
+    # rather than a misleading complex number.
+    if eq.iloc[-1] > 0 and eq.iloc[0] > 0:
+        cagr = float((eq.iloc[-1] / eq.iloc[0]) ** (1.0 / years) - 1.0)
+    else:
+        cagr = float("nan")
 
     std = rets.std(ddof=0)
     sharpe = float(np.sqrt(ann) * rets.mean() / std) if std > 0 else 0.0
@@ -56,13 +62,17 @@ def compute(bt: pd.DataFrame, trades: pd.DataFrame) -> Metrics:
     sortino = float(np.sqrt(ann) * rets.mean() / dstd) if dstd > 0 else 0.0
 
     mdd = float(bt["drawdown"].min())
-    calmar = float(cagr / abs(mdd)) if mdd < 0 else 0.0
+    if mdd < 0 and not np.isnan(cagr):
+        calmar = float(cagr / abs(mdd))
+    else:
+        calmar = float("nan")
+    bankrupt = bool((eq <= 0).any())
 
     n = len(trades)
     if n == 0:
         return Metrics(
             total_return, cagr, sharpe, sortino, mdd, calmar,
-            0, 0.0, 0.0, 0.0, 0.0,
+            0, 0.0, 0.0, 0.0, 0.0, bankrupt,
         )
 
     wins = trades[trades["net_pnl"] > 0]
@@ -86,4 +96,5 @@ def compute(bt: pd.DataFrame, trades: pd.DataFrame) -> Metrics:
         profit_factor=profit_factor,
         expectancy=expectancy,
         avg_bars_in_trade=avg_bars,
+        bankrupt=bankrupt,
     )

@@ -66,6 +66,16 @@ def render_trade_chart(
 
     # --- Trade markers ---
     if trades is not None and not trades.empty:
+        # Cast to plain Python types; some Plotly versions choke on int8/object
+        # customdata mixes when one row is empty.
+        trades = trades.copy()
+        trades["side"] = trades["side"].astype(int)
+        trades["entry_price"] = trades["entry_price"].astype(float)
+        trades["exit_price"] = trades["exit_price"].astype(float)
+        trades["net_pnl"] = trades["net_pnl"].astype(float)
+        trades["exit_reason"] = trades["exit_reason"].astype(str).fillna("")
+        trades = trades.dropna(subset=["entry_time", "exit_time", "entry_price", "exit_price"])
+
         long_e = trades[trades["side"] == 1]
         short_e = trades[trades["side"] == -1]
         wins = trades[trades["net_pnl"] > 0]
@@ -159,5 +169,8 @@ def render_trade_chart(
     fig.update_yaxes(title_text="%", row=3, col=1)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.write_html(str(output_path), include_plotlyjs="cdn", full_html=True)
+    # Inline plotly.js so the chart works without internet / behind proxies.
+    # Costs ~3.5 MB per HTML file but eliminates the "black screen" failure
+    # mode where the CDN fetch is blocked.
+    fig.write_html(str(output_path), include_plotlyjs=True, full_html=True)
     return output_path

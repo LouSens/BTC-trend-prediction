@@ -25,6 +25,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 import matplotlib
+import numpy as np
 import typer
 
 matplotlib.use("Agg")
@@ -74,6 +75,10 @@ def main(
     chart: bool = typer.Option(True, "--chart/--no-chart",
                                help="Write interactive Plotly HTML chart"),
     chart_max_bars: int = 5000,
+    invert_signal: bool = typer.Option(
+        False, "--invert-signal/--no-invert-signal",
+        help="Flip signal sign — useful when the diagnostic shows anti-edge",
+    ),
     # ---- Data ----
     csv: str | None = typer.Option(None, help="Local CSV/parquet to use instead of MT5"),
     use_mt5: bool = True,
@@ -93,7 +98,21 @@ def main(
     )
     sigs = generate_signals(bars["close"], sig_cfg)
     raw_signal = sigs["signal"]
+    if invert_signal:
+        raw_signal = -raw_signal
+        print("      Signal inverted (--invert-signal).")
     print(f"      Raw signal changes: {int((raw_signal.diff().abs() > 0).sum())}")
+
+    # Diagnostic: signal direction vs realized future return.
+    # Positive correlation -> signal is on the right side of the market.
+    # Negative correlation -> signal has anti-edge; consider --invert-signal.
+    fwd_ret = bars["close"].pct_change(horizon).shift(-horizon)
+    sig_active = raw_signal[raw_signal != 0]
+    if len(sig_active) > 50:
+        corr = float(sig_active.corr(fwd_ret.reindex(sig_active.index)))
+        hit = float((np.sign(sig_active) == np.sign(fwd_ret.reindex(sig_active.index))).mean())
+        print(f"      Raw-signal vs {horizon}-bar fwd return: corr={corr:+.4f}, "
+              f"hit-rate={hit:.3f}  ({'ANTI-EDGE — consider inverting' if corr < -0.01 else 'edge OK' if corr > 0.01 else 'no edge'})")
 
     print("[3/5] Applying filters...")
     f_cfg = FilterConfig(
