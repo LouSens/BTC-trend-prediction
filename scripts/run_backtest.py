@@ -11,7 +11,13 @@ Outputs:
 from __future__ import annotations
 
 import json
+import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+_SRC = Path(__file__).resolve().parents[1] / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 import matplotlib
 import typer

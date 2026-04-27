@@ -8,6 +8,12 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
+
+# Make `src/` importable when running the script directly without `pip install -e .`
+_SRC = Path(__file__).resolve().parents[1] / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from mcmc_cuda.data.mt5_loader import sanity_check
 
